@@ -14,7 +14,7 @@ async def analyze_ride(
 ):
     # Hier kiezen we de prompt
     if jury_type == "international":
-        prompt = """Strenge FEI 5* instructies: Act as an elite, strict FEI 5* Dressage Judge and Biomechanical Expert. 
+        prompt = """Strict FEI judge* instructies: Act as an elite, strict FEI 5* Dressage Judge and Biomechanical Expert. 
 Analyze the provided video using the written protocol as your chronological guide.
 
 You are known for your uncompromising and rigorous judging standards. To ensure absolute objectivity and fairness, apply the following strict scoring rules:
@@ -40,7 +40,7 @@ Return the output in a structured JSON format for my app dashboard:
 }
 """
     else:
-        prompt = """Vriendelijke lokale instructies: Act as a supportive, encouraging Local/National Dressage Judge and Trainer. 
+        prompt = """Gentle jury: Act as a supportive, encouraging Local/National Dressage Judge and Trainer. 
 Analyze the provided video using the written protocol as your guide.
 
 Your goal is to help the rider improve while judging fairly but constructively. Use the following guidelines:
