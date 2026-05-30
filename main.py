@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form  # <-- Form toegevoegd!
 from pydantic import BaseModel
 from typing import List, Optional
 import os
@@ -49,11 +49,11 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 def home():
     return {"status": "De AI Dressuur Jury backend draait succesvol!"}
 
-# 6. DE HOOFDROUTE: Nu met volwaardige Video Ingest
+# 6. DE HOOFDROUTE: Nu met Form-parameters voor vlekkeloze verwerking
 @app.post("/analyseer-proef/", response_model=ProefResultaat)
 async def start_analyse(
-    video_url: str, 
-    judge_type: str, 
+    video_url: str = Form(...),       # <-- Veranderd naar Form(...)
+    judge_type: str = Form(...),      # <-- Veranderd naar Form(...)
     protocol_file: UploadFile = File(...)
 ):
     if not GOOGLE_API_KEY:
@@ -86,7 +86,6 @@ async def start_analyse(
         print("Video uploaden naar Gemini...")
         gemini_file = genai.upload_file(path=tijdelijk_video_pad)
         
-        # Wacht tot Google de video heeft verwerkt (essentieel voor video's)
         while gemini_file.state.name == "PROCESSING":
             print("Gemini verwerkt de video momenteel...")
             time.sleep(3)
@@ -110,7 +109,7 @@ async def start_analyse(
             "3. Aanleuning (stabiele verbinding, nek als hoogste punt, absoluut NIET achter de loodlijn)\n"
             "4. Impuls & Rechtgerichtheid (energie vanuit de achterhand, achterbenen volgen de voorbenen)\n"
             "5. Verzameling (gewichtsverplaatsing naar de achterhand, elevatie vanuit de schoft)\n\n"
-            "Geef per laag een score tussen 0.0 i.p.v. 10.0. "
+            "Geef per laag een score tussen 0.0 en 10.0. "
             "Bereken het 'eindcijfer' voor de oefening als het wiskundige gemiddelde van deze 5 lagen.\n\n"
             "Schrijf voor ELKE oefening twee types feedback:\n"
             "- feedback_milde_coach: Opbouwende, motiverende tips gericht op de rijtechnische hulpen van de ruiter.\n"
@@ -118,7 +117,7 @@ async def start_analyse(
             "Je MOET antwoorden in een strikt JSON-formaat dat exact matcht met de gevraagde structuur."
         )
 
-        # E. De AI aanroepen met de ECHTE video en de prompt
+        # E. De AI aanroepen
         model = genai.GenerativeModel(
             model_name="gemini-1.5-pro",
             generation_config={"response_mime_type": "application/json"}
@@ -126,7 +125,6 @@ async def start_analyse(
         
         gebruiker_prompt = f"Analyseer deze dressuurvideo in de modus: {judge_type}. Geef de volledige JSON terug."
         
-        # We sturen nu het daadwerkelijke video-object van Google mee!
         response = model.generate_content([gemini_file, systeem_instructie, gebruiker_prompt])
         
         # F. Resultaat verwerken
@@ -138,11 +136,9 @@ async def start_analyse(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Fout tijdens de AI-analyse: {str(e)}")
     finally:
-        # Altijd de tijdelijke video opruimen op de server
         if os.path.exists(tijdelijk_video_pad):
             os.remove(tijdelijk_video_pad)
         try:
-            # Verwijder de video ook uit de cloudomgeving van Google
             genai.delete_file(gemini_file.name)
         except:
             pass
