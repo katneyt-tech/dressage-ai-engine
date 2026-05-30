@@ -4,15 +4,15 @@ import requests
 import tempfile
 import google.generativeai as genai
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 
 # 1. Initialiseer de FastAPI applicatie
 app = FastAPI(
     title="Dressuur AI API",
-    version="1.2.0"
+    description="Vul de parameters hieronder in om de video te analyseren.",
+    version="1.3.0"
 )
 
-# 2. Configureer de API-sleutel (pakt de ingestelde sleutel uit Render)
+# 2. Configureer de API-sleutel (werkt direct met je AQ.-sleutel)
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("API_KEY")
 
 if API_KEY:
@@ -20,12 +20,6 @@ if API_KEY:
     print("Gemini SDK succesvol geconfigureerd.")
 else:
     print("WAARSCHUWING: Geen API-sleutel gevonden in de omgevingsvariabelen!")
-
-# 3. Exact de invoervelden die je nodig hebt voor je systeem
-class BeoordelingRequest(BaseModel):
-    link: str   # De URL van de dressuurvideo
-    jury: str   # De specifieke jury-instructies of rol
-    proef: str  # De tekst/richtlijnen van de dressuurproef
 
 @app.get("/")
 def home():
@@ -35,7 +29,14 @@ def home():
     }
 
 @app.post("/analyseer")
-def analyseer_video(request: BeoordelingRequest):
+def analyseer_video(link: str, jury: str, proef: str):
+    """
+    Analyseer een dressuurvideo.
+    
+    - **link**: De URL van de video (bijv. de .mp4 testlink)
+    - **jury**: Jouw instructie (bijv. 'Je bent een subtop jury')
+    - **proef**: De tekst/richtlijnen van de proef
+    """
     if not API_KEY:
         raise HTTPException(
             status_code=500, 
@@ -46,9 +47,9 @@ def analyseer_video(request: BeoordelingRequest):
     video_file = None
 
     try:
-        # Stap A: Download de video via de 'link' variabele
-        print(f"Start download van video: {request.link}")
-        response = requests.get(request.link, stream=True)
+        # Stap A: Download de video via de 'link' parameter
+        print(f"Start download van video: {link}")
+        response = requests.get(link, stream=True)
         if response.status_code != 200:
             raise Exception(f"Kan video niet downloaden via de opgegeven link. Status: {response.status_code}")
 
@@ -77,10 +78,10 @@ def analyseer_video(request: BeoordelingRequest):
         # Stap D: Initialiseer het model (Gemini 1.5 Flash)
         model = genai.GenerativeModel(model_name="gemini-1.5-flash")
 
-        # Stap E: Combineer jouw 'jury' en 'proef' invoer in de definitieve opdracht
+        # Stap E: Combineer jury en proef invoer in de opdracht
         prompt = (
-            f"Instructie/Rol van de jury: {request.jury}\n\n"
-            f"Beoordeel de bijgevoegde video strikt op basis van deze dressuurproef:\n{request.proef}\n\n"
+            f"Instructie/Rol van de jury: {jury}\n\n"
+            f"Beoordeel de bijgevoegde video strikt op basis van deze dressuurproef:\n{proef}\n\n"
             "Geef een score en constructieve feedback per onderdeel in een nette, overzichtelijke structuur."
         )
 
@@ -98,9 +99,12 @@ def analyseer_video(request: BeoordelingRequest):
         raise HTTPException(status_code=500, detail=f"Fout tijdens de AI-analyse: {str(e)}")
 
     finally:
-        # Stap G: Altijd netjes opruimen om vollopen te voorkomen
+        # Stap G: Altijd netjes opruimen
         if temp_video_path and os.path.exists(temp_video_path):
-            os.remove(temp_video_path)
+            try:
+                os.remove(temp_video_path)
+            except Exception as e:
+                print(f"Kon tijdelijk bestand niet verwijderen: {str(e)}")
         
         if video_file:
             try:
