@@ -1,154 +1,120 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form  # <-- Form toegevoegd!
-from pydantic import BaseModel
-from typing import List, Optional
 import os
-import io
-import json
 import time
-import httpx
+import requests
+import tempfile
 import google.generativeai as genai
-from pypdf import PdfReader
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
-# 1. Start de FastAPI applicatie
-app = FastAPI(title="AI for Fairer Dressage Judging")
+# 1. Initialiseer de FastAPI applicatie
+app = FastAPI(
+    title="Dressuur AI Beoordeling API",
+    description="Een moderne API voor het objectief beoordelen van dressuurproeven met Gemini 1.5",
+    version="1.1.0"
+)
 
-# 2. Configureer de Google Gemini API Key
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
+# 2. Configureer de API-sleutel (zoekt naar GOOGLE_API_KEY of de oude API_KEY naam)
+API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("API_KEY")
 
-# 3. Het Pydantic-model voor de output
-class DressuurBeoordeling(BaseModel):
-    oefening_naam: str
-    ritme_score: float
-    ontspanning_score: float
-    aanleuning_score: float
-    impuls_rechtgerichtheid: float
-    verzameling_score: float
-    feedback_milde_coach: str
-    feedback_strenge_jury: str
-    eindcijfer: float
+if API_KEY:
+    genai.configure(api_key=API_KEY)
+    print("Gemini SDK succesvol geconfigureerd met de API-sleutel.")
+else:
+    print("WAARSCHUWING: Er is geen API-sleutel gevonden in de Render omgevingsvariabelen!")
 
-class ProefResultaat(BaseModel):
-    totaal_percentage: float
-    beoordeling_per_oefening: List[DressuurBeoordeling]
+# 3. Definieer het input-model voor Swagger (/docs)
+class BeoordelingRequest(BaseModel):
+    video_url: str
+    pdf_tekst: str
 
-# 4. HELPER FUNCTIE: Tekst uit de PDF halen
-def extract_text_from_pdf(file_bytes: bytes) -> str:
-    pdf_file = io.BytesIO(file_bytes)
-    reader = PdfReader(pdf_file)
-    extracted_text = ""
-    for page in reader.pages:
-        text = page.extract_text()
-        if text:
-            extracted_text += text + "\n"
-    return extracted_text.strip()
-
-# 5. Home route
 @app.get("/")
 def home():
-    return {"status": "De AI Dressuur Jury backend draait succesvol!"}
+    """Eenvoudige gezondheidscheck voor Render."""
+    return {
+        "status": "Online", 
+        "message": "De Dressuur AI API draait succesvol! Ga naar /docs voor de interface."
+    }
 
-# 6. DE HOOFDROUTE: Nu met Form-parameters voor vlekkeloze verwerking
-@app.post("/analyseer-proef/", response_model=ProefResultaat)
-async def start_analyse(
-    video_url: str = Form(...),       # <-- Veranderd naar Form(...)
-    judge_type: str = Form(...),      # <-- Veranderd naar Form(...)
-    protocol_file: UploadFile = File(...)
-):
-    if not GOOGLE_API_KEY:
-        raise HTTPException(status_code=500, detail="Gemini API sleutel ontbreekt op de server.")
-    
-    # A. PDF tekst extraheren (De Gids)
-    try:
-        file_bytes = await protocol_file.read()
-        protocol_tekst = extract_text_from_pdf(file_bytes)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Fout bij het lezen van de PDF: {str(e)}")
-        
-    if not protocol_tekst:
-        raise HTTPException(status_code=400, detail="Het PDF-protocol bevat geen leesbare tekst.")
-
-    # B. Video downloaden van de URL naar de Render server
-    tijdelijk_video_pad = "tijdelijke_video.mp4"
-    try:
-        print(f"Video downloaden van: {video_url}")
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            response = await client.get(video_url, timeout=90.0)
-            
-            # Als de externe server (zoals Google) een fout geeft, sturen we die direct door
-            if response.status_code != 200:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"De videolink weigert de download. Externe server gaf statuscode: {response.status_code}"
-                )
-                
-            with open(tijdelijk_video_pad, "wb") as f:
-                f.write(response.content)
-                
-    except HTTPException as he:
-        raise he  # Stuur FastAPI-fouten direct door zonder ze te veranderen
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Systeemfout bij downloaden video: {str(e)}")
-
-    # C. Video uploaden naar Google Gemini Files API
-    try:
-        print("Video uploaden naar Gemini...")
-        gemini_file = genai.upload_file(path=tijdelijk_video_pad)
-        
-        while gemini_file.state.name == "PROCESSING":
-            print("Gemini verwerkt de video momenteel...")
-            time.sleep(3)
-            gemini_file = genai.get_file(gemini_file.name)
-            
-        if gemini_file.state.name == "FAILED":
-            raise HTTPException(status_code=500, detail="Google Gemini kon de video niet verwerken.")
-            
-        print("Video succesvol verwerkt door Gemini. Start jurering...")
-
-        # D. De Systeeminstructie ('De Gouden Prompt')
-        systeem_instructie = (
-            "Je bent een gecertificeerde FEI 5* Dressuurjury en een professionele dressuurruiter. "
-            "Jouw taak is om de gereden dressuurvideo objectief te beoordelen op basis van het officiële proef-protocol. "
-            "Je gebruikt de 'Gids-methode': je volgt exact de oefeningen zoals beschreven in het onderstaande protocol.\n\n"
-            f"--- HET OFFICIËLE PROTOCOL (DE GIDS) ---\n{protocol_tekst}\n"
-            "-----------------------------------------\n\n"
-            "Beoordeel ELKE oefening uit het protocol op basis van de 5 lagen van de Klassieke Trainingsschaal:\n"
-            "1. Ritme & Regelmaat (takt, constante cadans)\n"
-            "2. Ontspanning (ruggebruik, losgelatenheid, afwezigheid van conflictgedrag zoals staartzwiepen of open mond)\n"
-            "3. Aanleuning (stabiele verbinding, nek als hoogste punt, absoluut NIET achter de loodlijn)\n"
-            "4. Impuls & Rechtgerichtheid (energie vanuit de achterhand, achterbenen volgen de voorbenen)\n"
-            "5. Verzameling (gewichtsverplaatsing naar de achterhand, elevatie vanuit de schoft)\n\n"
-            "Geef per laag een score tussen 0.0 en 10.0. "
-            "Bereken het 'eindcijfer' voor de oefening als het wiskundige gemiddelde van deze 5 lagen.\n\n"
-            "Schrijf voor ELKE oefening twee types feedback:\n"
-            "- feedback_milde_coach: Opbouwende, motiverende tips gericht op de rijtechnische hulpen van de ruiter.\n"
-            "- feedback_strenge_jury: Strikte, reglementaire FEI-beoordeling, objectief en direct.\n\n"
-            "Je MOET antwoorden in een strikt JSON-formaat dat exact matcht met de gevraagde structuur."
+@app.post("/analyseer")
+def analyseer_video(request: BeoordelingRequest):
+    """
+    Downloadt een video vanaf een URL, uploadt deze naar Gemini 1.5
+    en analyseert de beelden op basis van de meegegeven PDF-tekst.
+    """
+    if not API_KEY:
+        raise HTTPException(
+            status_code=500, 
+            detail="API-sleutel ontbreekt op de server. Controleer je Render Environment instellingen."
         )
 
-        # E. De AI aanroepen
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-pro",
-            generation_config={"response_mime_type": "application/json"}
-        )
-        
-        gebruiker_prompt = f"Analyseer deze dressuurvideo in de modus: {judge_type}. Geef de volledige JSON terug."
-        
-        response = model.generate_content([gemini_file, systeem_instructie, gebruiker_prompt])
-        
-        # F. Resultaat verwerken
-        resultaat_json = json.loads(response.text)
-        return resultaat_json
+    temp_video_path = None
+    video_file = None
 
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Gemini leverde geen geldige JSON-structuur.")
+    try:
+        # Stap A: Download de video vanaf de URL naar een tijdelijk lokaal bestand
+        print(f"Start download van video: {request.video_url}")
+        response = requests.get(request.video_url, stream=True)
+        if response.status_code != 200:
+            raise Exception(f"Kan video niet downloaden. HTTP Status: {response.status_code}")
+
+        # Maak een veilig tijdelijk bestand aan op de Render-server
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    temp_file.write(chunk)
+            temp_video_path = temp_file.name
+        print(f"Video succesvol lokaal opgeslagen op: {temp_video_path}")
+
+        # Stap B: Upload de video naar Google Gemini met de moderne upload_file methode
+        print("Video wordt geüpload naar Google Gemini...")
+        video_file = genai.upload_file(path=temp_video_path)
+        print(f"Upload voltooid. Google Bestands-ID: {video_file.name}")
+
+        # Stap C: Wacht live tot Google klaar is met het verwerken van de video
+        while video_file.state.name == "PROCESSING":
+            print("Google verwerkt de video momenteel... 5 seconden geduld...")
+            time.sleep(5)
+            video_file = genai.get_file(video_file.name)
+
+        if video_file.state.name == "FAILED":
+            raise Exception("De video-verwerking is aan de kant van Google mislukt.")
+
+        print("Video is succesvol verwerkt door Google. AI-analyse wordt gestart...")
+
+        # Stap D: Initialiseer het model (Gemini 1.5 Flash is razendsnel met video)
+        model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+
+        # Stap E: Bouw de instructie (prompt) voor de AI
+        prompt = (
+            "Je bent een professionele, objectieve dressuurjury.\n"
+            "Beoordeel de bijgevoegde video strikt op basis van de volgende proefrichtlijnen:\n\n"
+            f"{request.pdf_tekst}\n\n"
+            "Geef een duidelijke beoordeling per onderdeel met een score en constructieve feedback. "
+            "Zorg dat het resultaat netjes geformatteerd is (bij voorkeur als een valide JSON-structuur)."
+        )
+
+        # Stap F: Start de daadwerkelijke AI-analyse
+        analysis_response = model.generate_content([video_file, prompt])
+        print("Analyse succesvol afgerond!")
+        
+        return {
+            "status": "Succes",
+            "analyse": analysis_response.text
+        }
+
     except Exception as e:
+        print(f"CRITIEKE FOUT: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Fout tijdens de AI-analyse: {str(e)}")
+
     finally:
-        if os.path.exists(tijdelijk_video_pad):
-            os.remove(tijdelijk_video_pad)
-        try:
-            genai.delete_file(gemini_file.name)
-        except:
-            pass
+        # Stap G: Altijd strikt opruimen (gebeurt ook bij fouten om vollopen van server te voorkomen)
+        if temp_video_path and os.path.exists(temp_video_path):
+            os.remove(temp_video_path)
+            print("Tijdelijk lokaal videobestand succesvol verwijderd van Render.")
+        
+        if video_file:
+            try:
+                genai.delete_file(video_file.name)
+                print("Videobestand succesvol opgeruimd uit Google Cloud opslag.")
+            except Exception as e:
+                print(f"Waarschuwing: Kon bestand niet wissen bij Google: {str(e)}")
