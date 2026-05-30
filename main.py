@@ -69,17 +69,27 @@ async def start_analyse(
     if not protocol_tekst:
         raise HTTPException(status_code=400, detail="Het PDF-protocol bevat geen leesbare tekst.")
 
-    # B. Video downloaden naar de backend
+    # B. Video downloaden van de URL naar de Render server
     tijdelijk_video_pad = "tijdelijke_video.mp4"
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(video_url, timeout=60.0)
+        print(f"Video downloaden van: {video_url}")
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            response = await client.get(video_url, timeout=90.0)
+            
+            # Als de externe server (zoals Google) een fout geeft, sturen we die direct door
             if response.status_code != 200:
-                raise HTTPException(status_code=400, detail="Kan de video niet downloaden van de opgegeven URL.")
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"De videolink weigert de download. Externe server gaf statuscode: {response.status_code}"
+                )
+                
             with open(tijdelijk_video_pad, "wb") as f:
                 f.write(response.content)
+                
+    except HTTPException as he:
+        raise he  # Stuur FastAPI-fouten direct door zonder ze te veranderen
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Fout bij downloaden video: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Systeemfout bij downloaden video: {str(e)}")
 
     # C. Video uploaden naar Google Gemini Files API
     try:
