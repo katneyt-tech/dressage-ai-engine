@@ -57,7 +57,7 @@ async def analyseer_video(
         file_name = file_info["file"]["name"]
 
         # 4. Analyse
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={API_KEY}"
         payload = {"contents": [{"parts": [{"fileData": {"fileUri": file_info["file"]["uri"], "mimeType": "video/mp4"}}, {"text": f"Jury {jury}. Proef: {proef_tekst}"}]}]}
         res = requests.post(url, json=payload)
         
