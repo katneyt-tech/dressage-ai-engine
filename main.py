@@ -2,15 +2,17 @@ import os
 import time
 import requests
 import tempfile
+import io
+import pypdf
 from typing import Literal
 import google.generativeai as genai
-from fastapi import FastAPI, HTTPException, Query, Form
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 
 # 1. Initialiseer de FastAPI applicatie
 app = FastAPI(
     title="Dressuur AI API",
-    description="Plak de video-link, kies de jurering en plak de tekst van de proef.",
-    version="1.7.0"
+    description="Upload je PDF-proef rechtstreeks vanaf je apparaat en plak de video-link.",
+    version="1.8.0"
 )
 
 # 2. Configureer de API-sleutel
@@ -25,7 +27,7 @@ else:
 def zet_om_naar_directe_download(url: str) -> str:
     """
     Bouwt een standaard Google Drive deellink automatisch om 
-    naar een directe downloadlink die de code kan lezen.
+    naar een directe downloadlink.
     """
     if "drive.google.com" in url:
         if "/file/d/" in url:
@@ -41,10 +43,10 @@ def home():
     return {"status": "Online", "message": "Ga naar /docs om de proef te starten."}
 
 @app.post("/analyseer")
-def analyseer_video(
+async def analyseer_video(
     link: str = Query(..., description="De Google Drive deellink van de video (.mp4)"),
-    jury: Literal["mild", "FEI"] = Query(..., description="Kies het type jurering uit het dropdown-menu"),
-    proef_tekst: str = Query(..., description="Plak hier de volledige tekst of richtlijnen van de dressuurproef")
+    jury: Literal["mild", "FEI"] = Query(..., description="Kies het type jurering"),
+    proef_pdf: UploadFile = File(..., description="Selecteer het PDF-bestand van de proef vanaf je computer/telefoon")
 ):
     if not API_KEY:
         raise HTTPException(status_code=500, detail="API-sleutel ontbreekt op de server.")
@@ -53,17 +55,27 @@ def analyseer_video(
     video_file = None
 
     try:
-        # Stap 1: Controleer of de proef_tekst niet leeg is
+        # Stap 1: Lees de geüploade PDF direct uit het geheugen
+        print(f"Bestand ontvangen: {proef_pdf.filename}")
+        pdf_content = await proef_pdf.read()
+        
+        pdf_file = io.BytesIO(pdf_content)
+        reader = pypdf.PdfReader(pdf_file)
+        proef_tekst = ""
+        for page in reader.pages:
+            proef_tekst += page.extract_text() or ""
+        
         if not proef_tekst.strip():
-            raise Exception("Het veld 'proef_tekst' mag niet leeg zijn.")
+            raise Exception("De geüploade PDF bevat geen leesbare tekst of is leeg.")
+        print("Tekst succesvol uit de geüploade PDF gehaald.")
 
-        # Stap 2: Zet de video-URL om naar een directe download en start de download
+        # Stap 2: Download de video via de Drive link
         directe_video_url = zet_om_naar_directe_download(link)
         print(f"Video downloaden via: {directe_video_url}")
         
         video_response = requests.get(directe_video_url, stream=True)
         if video_response.status_code != 200:
-            raise Exception(f"Kan video niet downloaden. Staat de Google Drive link op 'Iedereen met de link'? Status: {video_response.status_code}")
+            raise Exception(f"Kan video ikke downloaden. Controleer de Drive-rechten. Status: {video_response.status_code}")
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
             for chunk in video_response.iter_content(chunk_size=8192):
@@ -71,11 +83,11 @@ def analyseer_video(
                     temp_file.write(chunk)
             temp_video_path = temp_file.name
 
-        # Stap 3: Uploaden naar Google Gemini (Flash is stabiel voor grote video's)
+        # Stap 3: Uploaden naar Google Gemini
         print("Video wordt geüpload naar Google Gemini...")
         video_file = genai.upload_file(path=temp_video_path)
 
-        # Stap 4: Wachten op verwerking door Google
+        # Stap 4: Wachten op verwerking
         while video_file.state.name == "PROCESSING":
             print("Google verwerkt de video...")
             time.sleep(5)
@@ -84,7 +96,7 @@ def analyseer_video(
         if video_file.state.name == "FAILED":
             raise Exception("De video-verwerking is bij Google mislukt.")
 
-        # Stap 5: Analyse uitvoeren
+        # Stap 5: Analyse uitvoeren via Flash
         model = genai.GenerativeModel(model_name="gemini-1.5-flash")
 
         prompt = (
