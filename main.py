@@ -4,14 +4,31 @@ import requests
 import tempfile
 import io
 import pypdf
+import json
 from typing import Literal
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 
-app = FastAPI(title="Dressuur AI API", version="2.4.0")
+app = FastAPI(title="Dressuur AI Engine", version="3.0.0")
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("API_KEY")
 
-def get_flash_model_name():
-    return "models/gemini-3.5-flash"
+# De Revolutionaire Dressuur-Prompt
+SYSTEM_PROMPT = """
+Je bent een professionele FEI-dressuurjury die jureert op basis van de Klassieke Trainingsschaal (5 lagen): 
+1. Fundament (Ritme, Ontspanning, Aanleuning, Impuls, Rechtgerichtheid)
+2. Biomechanica (Achterbeen, Schoftlift, Ruggebruik)
+3. FEI Proef-structuur
+4. Correctie van fouten (Harder straffen voor spanning/conflict dan voor gebrek aan expressie)
+5. Contextuele intelligentie (Ras/Niveau)
+
+Geef uitsluitend een JSON-antwoord in dit formaat:
+{
+  "cijfers": [{"onderdeel": "str", "cijfer": float, "toelichting": "str"}],
+  "lagen_score": {"fundament": float, "biomechanica": float, "harmonie": float},
+  "algemeen_commentaar": "str",
+  "percentage": float,
+  "advies": "str"
+}
+"""
 
 @app.post("/analyseer")
 async def analyseer_video(
@@ -44,23 +61,30 @@ async def analyseer_video(
         file_info = final_res.json()
         file_name = file_info["file"]["name"]
         
-        # 3. Wacht tot Google de video heeft verwerkt (CRUCIAAL)
+        # 3. Wacht tot Google klaar is
         while True:
             status_res = requests.get(f"https://generativelanguage.googleapis.com/v1beta/{file_name}", headers=headers).json()
-            state = status_res.get("state")
-            if state == "ACTIVE":
-                break
-            elif state == "FAILED":
-                raise Exception("Google kon de video niet verwerken.")
-            time.sleep(5) # Wacht 5 seconden en probeer opnieuw
+            if status_res.get("state") == "ACTIVE": break
+            time.sleep(5)
 
-        # 4. Analyseer
-        model_name = get_flash_model_name()
-        url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={API_KEY}"
-        payload = {"contents": [{"parts": [{"fileData": {"fileUri": file_info["file"]["uri"], "mimeType": "video/mp4"}}, {"text": f"Jury {jury}. Proef: {proef_tekst}"}]}]}
+        # 4. Analyse met 3.5-flash
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={API_KEY}"
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"fileData": {"fileUri": file_info["file"]["uri"], "mimeType": "video/mp4"}}, 
+                    {"text": f"{SYSTEM_PROMPT}\n\nJury-stijl: {jury}. Analyseer deze proef: {proef_tekst}"}
+                ]
+            }]
+        }
+        
         res = requests.post(url, json=payload).json()
         
-        return {"analyse": res['candidates'][0]['content']['parts'][0]['text']}
+        # JSON opschonen (soms stuurt Gemini ```json terug)
+        raw_text = res['candidates'][0]['content']['parts'][0]['text']
+        clean_json = raw_text.replace("```json", "").replace("```", "")
+        
+        return json.loads(clean_json)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Fout: {str(e)}")
