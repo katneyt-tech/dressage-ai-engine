@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 import os
 import io
+import json
 import google.generativeai as genai
 from pypdf import PdfReader
 
@@ -14,7 +15,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
 
-# 3. De Dressuurlogica (De 5 lagen)
+# 3. Het Pydantic-model voor de gestructureerde output van één oefening
 class DressuurBeoordeling(BaseModel):
     oefening_naam: str
     ritme_score: float
@@ -26,18 +27,20 @@ class DressuurBeoordeling(BaseModel):
     feedback_strenge_jury: str
     eindcijfer: float
 
-# 4. HELPER FUNCTIE: Tekst uit de PDF van het protocol halen
+# Het hoofdmodel dat een LIJST van alle oefeningen teruggeeft
+class ProefResultaat(BaseModel):
+    totaal_percentage: float
+    beoordeling_per_oefening: List[DressuurBeoordeling]
+
+# 4. HELPER FUNCTIE: Tekst uit de PDF halen
 def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Zet de pagina's van het PDF-protocol om in kale tekst voor de AI gids."""
     pdf_file = io.BytesIO(file_bytes)
     reader = PdfReader(pdf_file)
     extracted_text = ""
-    
     for page in reader.pages:
         text = page.extract_text()
         if text:
             extracted_text += text + "\n"
-            
     return extracted_text.strip()
 
 # 5. Home route
@@ -45,8 +48,8 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 def home():
     return {"status": "De AI Dressuur Jury backend draait succesvol!"}
 
-# 6. DE INPUT ROUTE: Hier komen de Video URL én het PDF-bestand binnen
-@app.post("/analyseer-proef/")
+# 6. DE HOOFDROUTE: Hier gebeurt de magie met Gemini
+@app.post("/analyseer-proef/", response_model=ProefResultaat)
 async def start_analyse(
     video_url: str, 
     judge_type: str, 
@@ -55,22 +58,64 @@ async def start_analyse(
     if not GOOGLE_API_KEY:
         raise HTTPException(status_code=500, detail="Gemini API sleutel ontbreekt op de server.")
     
-    # Lees de bytes van het geüploade PDF-bestand
+    # A. PDF tekst extraheren (De Gids)
     try:
         file_bytes = await protocol_file.read()
         protocol_tekst = extract_text_from_pdf(file_bytes)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Fout bij het lezen van het PDF-protocol: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Fout bij het lezen van de PDF: {str(e)}")
         
-    # Controleer of we daadwerkelijk tekst hebben kunnen vinden in de PDF
     if not protocol_tekst:
-        raise HTTPException(status_code=400, detail="Het PDF-bestand is leeg of kan niet worden gelezen.")
+        raise HTTPException(status_code=400, detail="Het PDF-protocol bevat geen leesbare tekst.")
 
-    # Voor nu sturen we een succesmelding terug met een klein stukje van de gelezen tekst als bewijs
-    return {
-        "status": "Succesvol ontvangen",
-        "video_url": video_url,
-        "jury_type": judge_type,
-        "gids_protocol_naam": protocol_file.filename,
-        "fragment_uit_gids": protocol_tekst[:150] + "..." # Toont de eerste 150 tekens van de proef ter controle
-    }
+    # B. De Systeeminstructie ('De Gouden Prompt') opstellen
+    systeem_instructie = (
+        "Je bent een gecertificeerde FEI 5* Dressuurjury en een professionele dressuurruiter. "
+        "Jouw taak is om een gereden dressuurproef objectief te beoordelen op basis van een video "
+        "en het officiële proef-protocol. Je gebruikt de 'Gids-methode': je volgt exact de oefeningen "
+        "zoals beschreven in het onderstaande protocol.\n\n"
+        f"--- HET OFFICIËLE PROTOCOL (DE GIDS) ---\n{protocol_tekst}\n"
+        "-----------------------------------------\n\n"
+        "Beoordeel ELKE oefening uit het protocol op basis van de 5 lagen van de Klassieke Trainingsschaal:\n"
+        "1. Ritme & Regelmaat (takt, constante cadans)\n"
+        "2. Ontspanning (ruggebruik, losgelatenheid, afwezigheid van conflictgedrag zoals staartzwiepen of open mond)\n"
+        "3. Aanleuning (stabiele verbinding, nek als hoogste punt, absoluut NIET achter de loodlijn)\n"
+        "4. Impuls & Rechtgerichtheid (energie vanuit de achterhand, achterbenen volgen de voorbenen)\n"
+        "5. Verzameling (gewichtsverplaatsing naar de achterhand, elevatie vanuit de schoft)\n\n"
+        "Geef per laag een score tussen 0.0 en 10.0. "
+        "Bereken het 'eindcijfer' voor de oefening als het wiskundige gemiddelde van deze 5 lagen.\n\n"
+        "Schrijf voor ELKE oefening twee types feedback:\n"
+        "- feedback_milde_coach: Opbouwende, motiverende tips gericht op de rijtechnische hulpen van de ruiter.\n"
+        "- feedback_strenge_jury: Strikte, reglementaire FEI-beoordeling, objectief en direct (bijv. aftrek voor tactverlies of achter de loodlijn).\n\n"
+        "Je MOET antwoorden in een strikt JSON-formaat dat exact matcht met de gevraagde structuur, "
+        "zonder extra tekst of markdown buiten de JSON."
+    )
+
+    # C. De Gemini API aanroepen
+    try:
+        # We gebruiken het krachtige gemini-1.5-pro model voor complexe video- en tekstanalyses
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-pro",
+            generation_config={
+                "response_mime_type": "application/json",
+            }
+        )
+        
+        # De prompt die we naar het model sturen (inclusief de video-referentie)
+        gebruiker_prompt = (
+            f"Analyseer de dressuurvideo te vinden op deze locatie: {video_url}. "
+            f"De gebruiker heeft gekozen voor de modus: {judge_type}. "
+            "Genereer de volledige proefanalyse in JSON-formaat, inclusief het totale eindpercentage."
+        )
+        
+        # Vraag Gemini om het resultaat te genereren
+        response = model.generate_content([systeem_instructie, gebruiker_prompt])
+        
+        # D. De JSON-output van Gemini verwerken
+        resultaat_json = json.loads(response.text)
+        return resultaat_json
+
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Gemini leverde geen geldige JSON-structuur aan.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fout tijdens de Gemini API analyse: {str(e)}")
