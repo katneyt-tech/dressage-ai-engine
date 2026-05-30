@@ -11,15 +11,17 @@ app = FastAPI(title="Dressuur AI API", version="2.2.0")
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("API_KEY")
 
 def get_flash_model_name(headers):
-    # Vraag de lijst met modellen op bij Google
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
     res = requests.get(url).json()
-    # Zoek naar een model dat 'gemini-1.5-flash' in de naam heeft
-    for model in res.get('models', []):
-        if "gemini-1.5-flash" in model['name']:
-            return model['name']
-    return "models/gemini-1.5-flash" # Fallback
-
+    model_names = [m['name'] for m in res.get('models', [])]
+    
+    # Zoek de meest geschikte
+    for name in model_names:
+        if "gemini-1.5-flash" in name:
+            return name
+            
+    # Als hij niks vindt, geef de lijst terug in de foutmelding!
+    raise Exception(f"Model niet gevonden. Beschikbare modellen: {model_names}")
 @app.post("/analyseer")
 async def analyseer_video(
     link: str = Query(...),
